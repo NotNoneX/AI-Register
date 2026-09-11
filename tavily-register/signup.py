@@ -278,7 +278,18 @@ def extract_turnstile_sitekey(html: str) -> str | None:
     return None
 
 
-YESCAPTCHA_SOFT_ID = 102154
+YESCAPTCHA_SOFT_ID = "102154"
+
+
+def _create_direct_captcha_session() -> requests.Session:
+    """Create a session that never inherits application or environment proxies."""
+    session = requests.Session()
+    session.trust_env = False
+    session.proxies.clear()
+    return session
+
+
+_CAPTCHA_SERVICE_SESSION = _create_direct_captcha_session()
 
 
 def solve_turnstile_with_yescaptcha(sitekey: str, page_url: str, config: dict) -> str | None:
@@ -306,7 +317,7 @@ def solve_turnstile_with_yescaptcha(sitekey: str, page_url: str, config: dict) -
 
     try:
         response = external_request_with_retry(
-            requests.post,
+            _CAPTCHA_SERVICE_SESSION.post,
             "https://api.yescaptcha.com/createTask",
             node="POST yescaptcha.com/createTask",
             json=create_payload,
@@ -330,11 +341,13 @@ def solve_turnstile_with_yescaptcha(sitekey: str, page_url: str, config: dict) -
     print(f"    Turnstile 任务已创建: {task_id}")
     result_payload = {"clientKey": client_key, "taskId": task_id}
 
-    for attempt in range(30):
-        time.sleep(2 if attempt == 0 else 1.5)
+    # YesCaptcha documents a 10-80 second solve window and recommends polling
+    # processing tasks every 3 seconds. Thirty polls cover the full window.
+    for _attempt in range(30):
+        time.sleep(3)
         try:
             response = external_request_with_retry(
-                requests.post,
+                _CAPTCHA_SERVICE_SESSION.post,
                 "https://api.yescaptcha.com/getTaskResult",
                 node="POST yescaptcha.com/getTaskResult",
                 json=result_payload,
@@ -464,7 +477,7 @@ def recognize_captcha_with_yescaptcha(captcha_base64: str, config: dict) -> str 
 
     try:
         response = external_request_with_retry(
-            requests.post,
+            _CAPTCHA_SERVICE_SESSION.post,
             "https://api.yescaptcha.com/createTask",
             node="POST yescaptcha.com/createTask",
             json=create_payload,
@@ -499,7 +512,7 @@ def recognize_captcha_with_yescaptcha(captcha_base64: str, config: dict) -> str 
         time.sleep(2 if attempt == 0 else 1.5)
         try:
             response = external_request_with_retry(
-                requests.post,
+                _CAPTCHA_SERVICE_SESSION.post,
                 "https://api.yescaptcha.com/getTaskResult",
                 node="POST yescaptcha.com/getTaskResult",
                 json=result_payload,

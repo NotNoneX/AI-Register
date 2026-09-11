@@ -7,11 +7,13 @@ from utils import extract_verification_link, generate_password, save_api_key
 
 
 class FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self.payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self):
-        return None
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
     def json(self):
         return self.payload
@@ -51,6 +53,54 @@ class FakeOutlookTwSession:
         self.closed = True
 
 
+class FakeCaptchaSession(FakeOutlookTwSession):
+    def __init__(self):
+        super().__init__()
+        self.captcha_passed = False
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append((url, params, timeout))
+        if url.endswith("/api/generate"):
+            return FakeResponse({"email": "captcha@outlook.tw", "expires": 123})
+        if url.endswith("/api/emails") and not self.captcha_passed:
+            return FakeResponse(
+                {"error": "captcha-required", "sitekey": "test-site-key"},
+                status_code=403,
+            )
+        if url.endswith("/api/emails"):
+            return FakeResponse(
+                [
+                    {
+                        "html_content": (
+                            "https://auth.tavily.com/u/email-verification?"
+                            "ticket=after-captcha"
+                        )
+                    }
+                ]
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+
+class AlwaysCaptchaSession(FakeOutlookTwSession):
+    def get(self, url, params=None, timeout=None):
+        self.calls.append((url, params, timeout))
+        if url.endswith("/api/emails"):
+            return FakeResponse(
+                {"error": "captcha-required", "sitekey": "test-site-key"},
+                status_code=403,
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+
+class FakeCaptchaSubmitSession:
+    def __init__(self):
+        self.post_calls = []
+
+    def post(self, url, headers=None, timeout=None):
+        self.post_calls.append((url, headers, timeout))
+        return FakeResponse({"success": True})
+
+
 class VerificationLinkTests(unittest.TestCase):
     def test_extract_verification_link_from_html(self):
         content = (
@@ -85,6 +135,100 @@ class OutlookTwProviderTests(unittest.TestCase):
         )
         self.assertTrue(provider.completed)
         self.assertTrue(session.closed)
+
+    def test_default_providers_reuse_one_captcha_bearing_session(self):
+        import outlook_tw_provider
+
+        outlook_tw_provider.close_shared_outlook_tw_session()
+        session = FakeOutlookTwSession()
+        try:
+            with patch(
+                "outlook_tw_provider._create_http_session",
+                return_value=session,
+            ):
+                first = outlook_tw_provider.OutlookTwProvider()
+                second = outlook_tw_provider.OutlookTwProvider()
+
+            self.assertIs(first.session, session)
+            self.assertIs(second.session, session)
+            first.close()
+            second.close()
+            self.assertFalse(session.closed)
+        finally:
+            outlook_tw_provider.close_shared_outlook_tw_session()
+
+        self.assertTrue(session.closed)
+
+    def test_captcha_required_runs_yescaptcha_solver_once_then_retries(self):
+        from outlook_tw_provider import OutlookTwProvider
+
+        session = FakeCaptchaSession()
+        solver_calls = []
+
+        def solve(fake_session, sitekey):
+            solver_calls.append(sitekey)
+            fake_session.captcha_passed = True
+
+        provider = OutlookTwProvider(session=session, captcha_solver=solve)
+        self.assertEqual(provider.acquire_email(), "captcha@outlook.tw")
+        self.assertEqual(
+            provider.wait_for_verification_link(),
+            "https://auth.tavily.com/u/email-verification?ticket=after-captcha",
+        )
+        self.assertEqual(
+            solver_calls,
+            ["test-site-key"],
+        )
+
+    def test_yescaptcha_token_is_submitted_like_outlook_frontend(self):
+        from outlook_tw_captcha import complete_outlook_tw_captcha
+
+        session = FakeCaptchaSubmitSession()
+        fake_config = {"YESCAPTCHA_CLIENT_KEY": "test-client-key"}
+        with (
+            patch("signup.load_config", return_value=fake_config),
+            patch(
+                "signup.solve_turnstile_with_yescaptcha",
+                return_value="solved-turnstile-token",
+            ) as solve,
+        ):
+            complete_outlook_tw_captcha(session, "test-site-key")
+
+        solve.assert_called_once_with(
+            "test-site-key",
+            "https://outlook.tw/",
+            fake_config,
+        )
+        self.assertEqual(len(session.post_calls), 1)
+        url, headers, timeout = session.post_calls[0]
+        self.assertEqual(url, "https://outlook.tw/api/captcha")
+        self.assertEqual(
+            headers["cf-turnstile-response"],
+            "solved-turnstile-token",
+        )
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertGreater(timeout, 0)
+
+    def test_rejected_yescaptcha_token_does_not_resolve_forever(self):
+        from outlook_tw_captcha import OutlookTwCaptchaError
+        from outlook_tw_provider import OutlookTwProvider
+
+        session = AlwaysCaptchaSession()
+        solver_calls = []
+        provider = OutlookTwProvider(
+            session=session,
+            captcha_solver=lambda *_args: solver_calls.append(True),
+        )
+        provider.email = "captcha@outlook.tw"
+
+        with self.assertRaisesRegex(
+            OutlookTwCaptchaError,
+            "拒绝了 YesCaptcha token",
+        ):
+            provider.wait_for_verification_link()
+
+        self.assertEqual(solver_calls, [True])
+        self.assertEqual(len(session.calls), 2)
 
 
 class ApiKeyOutputTests(unittest.TestCase):
@@ -148,4 +292,3 @@ class ProxyManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

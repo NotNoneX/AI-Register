@@ -17,6 +17,112 @@ class FakeResponse:
             self.headers["Location"] = location
 
 
+class FakeJsonResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.payload
+
+
+class YesCaptchaTests(unittest.TestCase):
+    def test_direct_captcha_session_ignores_environment_proxies(self):
+        with patch.dict(
+            "signup.os.environ",
+            {
+                "HTTP_PROXY": "http://unstable-proxy.test:8080",
+                "HTTPS_PROXY": "http://unstable-proxy.test:8080",
+                "ALL_PROXY": "socks5://unstable-proxy.test:1080",
+            },
+        ):
+            session = signup._create_direct_captcha_session()
+            settings = session.merge_environment_settings(
+                "https://api.yescaptcha.com/createTask",
+                {},
+                None,
+                None,
+                None,
+            )
+            session.close()
+
+        self.assertFalse(session.trust_env)
+        self.assertEqual(settings["proxies"], {})
+
+    @patch("signup.time.sleep", return_value=None)
+    @patch("signup.external_request_with_retry")
+    def test_turnstile_create_task_includes_developer_soft_id(
+        self,
+        request_with_retry,
+        _sleep,
+    ):
+        request_with_retry.side_effect = [
+            FakeJsonResponse({"errorId": 0, "taskId": "turnstile-task"}),
+            FakeJsonResponse(
+                {
+                    "errorId": 0,
+                    "status": "ready",
+                    "solution": {"token": "turnstile-token"},
+                }
+            ),
+        ]
+
+        token = signup.solve_turnstile_with_yescaptcha(
+            "site-key",
+            "https://example.test/",
+            {"YESCAPTCHA_CLIENT_KEY": "test-client-key"},
+        )
+
+        self.assertEqual(token, "turnstile-token")
+        for call in request_with_retry.call_args_list:
+            self.assertIs(
+                call.args[0].__self__,
+                signup._CAPTCHA_SERVICE_SESSION,
+            )
+        self.assertFalse(signup._CAPTCHA_SERVICE_SESSION.trust_env)
+        self.assertEqual(signup._CAPTCHA_SERVICE_SESSION.proxies, {})
+        create_payload = request_with_retry.call_args_list[0].kwargs["json"]
+        self.assertEqual(create_payload["softID"], "102154")
+        self.assertNotIn("softID", create_payload["task"])
+
+    @patch("signup.svg_to_png_base64", return_value="png-base64")
+    @patch("signup.time.sleep", return_value=None)
+    @patch("signup.external_request_with_retry")
+    def test_image_create_task_includes_developer_soft_id(
+        self,
+        request_with_retry,
+        _sleep,
+        _convert,
+    ):
+        request_with_retry.side_effect = [
+            FakeJsonResponse({"errorId": 0, "taskId": "image-task"}),
+            FakeJsonResponse(
+                {
+                    "errorId": 0,
+                    "status": "ready",
+                    "solution": {"text": "AB12"},
+                }
+            ),
+        ]
+
+        result = signup.recognize_captcha_with_yescaptcha(
+            "svg-base64",
+            {"YESCAPTCHA_CLIENT_KEY": "test-client-key"},
+        )
+
+        self.assertEqual(result, "AB12")
+        for call in request_with_retry.call_args_list:
+            self.assertIs(
+                call.args[0].__self__,
+                signup._CAPTCHA_SERVICE_SESSION,
+            )
+        create_payload = request_with_retry.call_args_list[0].kwargs["json"]
+        self.assertEqual(create_payload["softID"], "102154")
+        self.assertNotIn("softID", create_payload["task"])
+
+
 class VerificationSession:
     def __init__(self):
         self.redirect_attempts = 0

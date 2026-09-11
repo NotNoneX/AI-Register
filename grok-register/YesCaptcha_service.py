@@ -12,7 +12,7 @@ load_dotenv()
 
 
 
-YESCAPTCHA_SOFT_ID = 102154
+YESCAPTCHA_SOFT_ID = "102154"
 
 
 

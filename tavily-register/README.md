@@ -48,6 +48,14 @@ EMAIL_PROVIDER: "outlook_tw"
 - `OUTLOOK_TW_BASE_URL`: `https://outlook.tw`
 - `OUTLOOK_TW_USERNAME_LENGTH`: 8
 
+`outlook.tw` 首次访问受保护接口时会显示 Cloudflare Turnstile。脚本只在收到
+`captcha-required` 后读取响应中的 `sitekey`，通过 YesCaptcha 的
+[`TurnstileTaskProxyless`](https://yescaptcha.atlassian.net/wiki/spaces/YESCAPTCHA/pages/61734913/TurnstileTaskProxyless+CloudflareTurnstile)
+获取 token，再提交到 `/api/captcha`。验证成功后的
+`mf-captcha` Cookie 会保存在批次共享的邮件 Session 中，后续随机邮箱生成和
+收件箱轮询不会重复创建打码任务。此流程复用上面的 `YESCAPTCHA_CLIENT_KEY`
+配置，不需要启动 Chrome。
+
 ## 运行
 
 查看参数：
@@ -81,6 +89,7 @@ YESCAPTCHA_CLIENT_KEY=your_yescaptcha_key uv run python main.py
 - 轮换 IP 时保留当前邮箱、密码和已取得的验证链接，并从当前账号的最近状态继续，不会直接跳到下一个邮箱。
 - 同一 IP 仍保留最多 10 次注册尝试限制；任一阈值先达到都会触发轮换。
 - Outlook、LuckMail、YesCaptcha、代理提取和出口 IP 检测使用独立的 3 次网络重试，不计入 Tavily 出口 IP 的失败额度。
+- YesCaptcha 等打码服务使用专用直连 Session，不使用 Tavily 注册代理，并忽略系统中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等环境代理。
 
 
 
